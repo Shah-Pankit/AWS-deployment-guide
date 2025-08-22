@@ -635,7 +635,7 @@ function App() {
                                 "# Check Nginx service status",
                                 "sudo systemctl status nginx",
                                 "",
-                                "# Check your FastAPI service status (replace 'ec2-user' with your OS user)",
+                                "# Check your FastAPI service status (replace 'ec2-user' with your actual OS user)",
                                 "sudo systemctl status fastapi@ec2-user",
                                 "",
                                 "# View real-time logs for your FastAPI service",
@@ -660,8 +660,50 @@ function App() {
 
     // Ref for the main content area to observe scroll
     const mainContentRef = useRef(null);
-    // Refs for each section to observe their visibility
-    const sectionRefs = useRef({});
+    // Refs for ALL sections (main and sub) to observe their visibility for TOC highlighting
+    const allSectionRefs = useRef({});
+
+    // Filter content based on search query - MOVED THIS UP
+    const filteredContent = checklistContent.filter((mainSection) => {
+        const lowerCaseQuery = searchQuery.toLowerCase();
+        const matchesMainTitle = mainSection.title.toLowerCase().includes(lowerCaseQuery);
+
+        const matchesSubSections = mainSection.sections.some((subSection) => {
+            const matchesSubTitle = subSection.title.toLowerCase().includes(lowerCaseQuery);
+            const matchesSubDescription = subSection.description.toLowerCase().includes(lowerCaseQuery);
+            const matchesContentBlocks = subSection.contentBlocks.some(block => {
+                if (block.type === 'command' && block.commands && block.commands.some(cmd => cmd.toLowerCase().includes(lowerCaseQuery))) return true;
+                if (block.type === 'pitfall' && (
+                    (block.title && block.title.toLowerCase().includes(lowerCaseQuery)) ||
+                    (block.content && block.content.toLowerCase().includes(lowerCaseQuery)) ||
+                    (block.fix && block.fix.toLowerCase().includes(lowerCaseQuery))
+                )) return true;
+                if (block.type === 'text' && block.content && block.content.toLowerCase().includes(lowerCaseQuery)) return true;
+                return false;
+            });
+            return matchesSubTitle || matchesSubDescription || matchesContentBlocks;
+        });
+        return matchesMainTitle || matchesSubSections;
+    }).map(mainSection => ({
+        ...mainSection,
+        sections: mainSection.sections.filter(subSection => {
+            const lowerCaseQuery = searchQuery.toLowerCase(); // Re-define for scope safety, or pass from outer scope
+            const matchesSubTitle = subSection.title.toLowerCase().includes(lowerCaseQuery);
+            const matchesSubDescription = subSection.description.toLowerCase().includes(lowerCaseQuery);
+            const matchesContentBlocks = subSection.contentBlocks.some(block => {
+                if (block.type === 'command' && block.commands && block.commands.some(cmd => cmd.toLowerCase().includes(lowerCaseQuery))) return true;
+                if (block.type === 'pitfall' && (
+                    (block.title && block.title.toLowerCase().includes(lowerCaseQuery)) ||
+                    (block.content && block.content.toLowerCase().includes(lowerCaseQuery)) ||
+                    (block.fix && block.fix.toLowerCase().includes(lowerCaseQuery))
+                )) return true;
+                if (block.type === 'text' && block.content && block.content.toLowerCase().includes(lowerCaseQuery)) return true;
+                return false;
+            });
+            return matchesSubTitle || matchesSubDescription || matchesContentBlocks;
+        })
+    }));
+
 
     // Effect to apply theme to the document body and save to localStorage
     useEffect(() => {
@@ -677,6 +719,13 @@ function App() {
 
     // Effect to set up IntersectionObserver for TOC active highlighting
     useEffect(() => {
+        // Create an array of all unique section IDs that should be observed
+        const allObservableIds = [];
+        filteredContent.forEach(mainSec => {
+            allObservableIds.push(mainSec.id);
+            mainSec.sections.forEach(subSec => allObservableIds.push(subSec.id));
+        });
+
         const observerOptions = {
             root: mainContentRef.current, // Observe within the main content scroll area
             rootMargin: '0px 0px -50% 0px', // When 50% of the section is visible
@@ -684,15 +733,64 @@ function App() {
         };
 
         const observer = new IntersectionObserver((entries) => {
-            entries.forEach((entry) => {
+            let highestVisibleSectionId = null;
+            let minDistanceFromTop = Infinity;
+            // Define an "active line" in the top part of the viewport for better UX
+            const activeLineOffset = mainContentRef.current ? mainContentRef.current.getBoundingClientRect().top + (mainContentRef.current.clientHeight * 0.25) : window.innerHeight * 0.25;
+
+
+            entries.forEach(entry => {
                 if (entry.isIntersecting) {
-                    setActiveSectionId(entry.target.id);
+                    const rect = entry.boundingClientRect;
+
+                    // Calculate the position relative to the scrollable root
+                    const rootRect = mainContentRef.current.getBoundingClientRect();
+                    const relativeTop = rect.top - rootRect.top;
+                    const relativeBottom = rect.bottom - rootRect.top;
+
+                    // If the section's top is at or above the active line, and its bottom is below it
+                    // This means the section is currently "crossing" or containing the active line
+                    if (relativeTop <= activeLineOffset && relativeBottom > activeLineOffset) {
+                        // We want the section whose top is closest to the active line and is above it,
+                        // or the first one that crosses the line.
+                        if (relativeTop < minDistanceFromTop) {
+                            minDistanceFromTop = relativeTop;
+                            highestVisibleSectionId = entry.target.id;
+                        }
+                    }
                 }
             });
+
+            // Fallback for very top of the page: if nothing else is active, highlight the first section
+            // Check if scroll position is very close to the top
+            if (!highestVisibleSectionId && mainContentRef.current && mainContentRef.current.scrollTop < 100 && filteredContent.length > 0) {
+                 highestVisibleSectionId = filteredContent[0].id; // First main section
+            }
+            // Fallback for very bottom of the page: if no new section is crossing the line,
+            // and we're at the bottom, highlight the last applicable section.
+            else if (!highestVisibleSectionId && mainContentRef.current &&
+                     mainContentRef.current.scrollTop + mainContentRef.current.clientHeight >= mainContentRef.current.scrollHeight - 100 && filteredContent.length > 0) {
+                 const lastMainSection = filteredContent[filteredContent.length - 1];
+                 const lastSubSection = lastMainSection.sections[lastMainSection.sections.length - 1];
+                 highestVisibleSectionId = lastSubSection ? lastSubSection.id : lastMainSection.id;
+            }
+
+
+            if (highestVisibleSectionId && highestVisibleSectionId !== activeSectionId) {
+                setActiveSectionId(highestVisibleSectionId);
+            }
         }, observerOptions);
 
-        // Observe all main sections
-        Object.values(sectionRefs.current).forEach((ref) => {
+        // Disconnect previous observer instances if dependencies change, then re-observe
+        Object.values(allSectionRefs.current).forEach((ref) => {
+            if (ref) {
+                observer.unobserve(ref); // Unobserve all before re-observing
+            }
+        });
+
+        // Observe all *currently visible and filtered* sections
+        allObservableIds.forEach((id) => {
+            const ref = allSectionRefs.current[id];
             if (ref) {
                 observer.observe(ref);
             }
@@ -702,35 +800,7 @@ function App() {
         return () => {
             observer.disconnect();
         };
-    }, [searchQuery, checklistContent]); // Re-run observer if search filters content or content changes, ensuring correct refs are observed
-
-    // Filter content based on search query
-    const filteredContent = checklistContent.filter((mainSection) => {
-        const matchesMainTitle = mainSection.title.toLowerCase().includes(searchQuery.toLowerCase());
-        const matchesSubSections = mainSection.sections.some((subSection) =>
-            subSection.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            subSection.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            subSection.contentBlocks.some(block => {
-                if (block.type === 'command' && block.commands.some(cmd => cmd.toLowerCase().includes(searchQuery.toLowerCase()))) return true;
-                if (block.type === 'pitfall' && (block.title.toLowerCase().includes(searchQuery.toLowerCase()) || block.content.toLowerCase().includes(searchQuery.toLowerCase()) || block.fix.toLowerCase().includes(searchQuery.toLowerCase()))) return true;
-                if (block.type === 'text' && block.content.toLowerCase().includes(searchQuery.toLowerCase())) return true;
-                return false;
-            })
-        );
-        return matchesMainTitle || matchesSubSections;
-    }).map(mainSection => ({
-        ...mainSection,
-        sections: mainSection.sections.filter(subSection =>
-            subSection.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            subSection.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            subSection.contentBlocks.some(block => {
-                if (block.type === 'command' && block.commands.some(cmd => cmd.toLowerCase().includes(searchQuery.toLowerCase()))) return true;
-                if (block.type === 'pitfall' && (block.title.toLowerCase().includes(searchQuery.toLowerCase()) || block.content.toLowerCase().includes(searchQuery.toLowerCase()) || block.fix.toLowerCase().includes(searchQuery.toLowerCase()))) return true;
-                if (block.type === 'text' && block.content.toLowerCase().includes(searchQuery.toLowerCase())) return true;
-                return false;
-            })
-        )
-    }));
+    }, [filteredContent, mainContentRef.current]); // Re-run if filtered content changes or scroll root changes
 
 
     // Component for a styled button (e.g., for "Back to Top")
@@ -790,8 +860,8 @@ function App() {
         </button>
     );
 
-    // Component for Search Bar
-    const SearchBar = ({ searchQuery, setSearchQuery }) => (
+    // Component for Search Bar - now memoized for focus stability
+    const SearchBar = React.memo(({ searchQuery, setSearchQuery }) => (
         <div className="mb-8 p-4 bg-gray-100 dark:bg-gray-800 rounded-lg shadow-inner">
             <label htmlFor="search-input" className="sr-only">Search checklist</label>
             <input
@@ -804,12 +874,9 @@ function App() {
                 aria-label="Search checklist"
             />
         </div>
-    );
+    ));
 
     // Component for Code Block with Copy Button
-    // The `language` prop is passed but not directly used for highlighting in this
-    // pure HTML/CSS/JS context without a separate syntax highlighter library.
-    // It's kept for future integration with libraries like react-syntax-highlighter.
     const CodeBlockWithCopy = ({ commands, language = 'bash' }) => {
         const [copied, setCopied] = useState(false);
 
@@ -885,17 +952,17 @@ function App() {
     };
 
     // Component for Collapsible Accordion sections
-    const Accordion = ({ title, description, contentBlocks, defaultOpen = false }) => {
+    const Accordion = ({ id, title, description, contentBlocks, defaultOpen = false, allSectionRefs }) => {
         const [isOpen, setIsOpen] = useState(defaultOpen);
 
         return (
-            <div className="border border-gray-200 dark:border-gray-700 rounded-lg mb-4 bg-white dark:bg-gray-800 shadow-md">
+            <div id={id} ref={(el) => (allSectionRefs.current[id] = el)} className="border border-gray-200 dark:border-gray-700 rounded-lg mb-4 bg-white dark:bg-gray-800 shadow-md">
                 <h2 className="mb-0">
                     <button
                         className="flex justify-between items-center w-full p-5 text-left font-semibold text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg"
                         onClick={() => setIsOpen(!isOpen)}
                         aria-expanded={isOpen}
-                        aria-controls={`accordion-content-${title.replace(/\s+/g, '-')}`}
+                        aria-controls={`accordion-content-${id}`}
                     >
                         {title}
                         <span className="transform transition-transform duration-300 ease-in-out">
@@ -908,7 +975,7 @@ function App() {
                     </button>
                 </h2>
                 <div
-                    id={`accordion-content-${title.replace(/\s+/g, '-')}`}
+                    id={`accordion-content-${id}`}
                     className={`overflow-hidden transition-all duration-300 ease-in-out ${isOpen ? 'max-h-screen opacity-100' : 'max-h-0 opacity-0'}`}
                 >
                     <div className="p-5 border-t border-gray-200 dark:border-gray-700">
@@ -949,8 +1016,8 @@ function App() {
     };
 
     // Component to display a main Checklist Section
-    const ChecklistSection = ({ mainSection, defaultOpen = false, sectionRefs }) => (
-        <section id={mainSection.id} ref={(el) => (sectionRefs.current[mainSection.id] = el)} className="mb-8 p-6 bg-white dark:bg-gray-800 rounded-xl shadow-lg transition-colors duration-200">
+    const ChecklistSection = ({ mainSection, defaultOpen = false, allSectionRefs }) => (
+        <section id={mainSection.id} ref={(el) => (allSectionRefs.current[mainSection.id] = el)} className="mb-8 p-6 bg-white dark:bg-gray-800 rounded-xl shadow-lg transition-colors duration-200">
             <h2 className="text-3xl font-bold text-gray-900 dark:text-gray-50 mb-6 border-b pb-3 border-gray-200 dark:border-gray-700">
                 {mainSection.title}
             </h2>
@@ -958,10 +1025,12 @@ function App() {
                 {mainSection.sections.map((step) => (
                     <Accordion
                         key={step.id}
+                        id={step.id} // Pass id to Accordion so it can attach ref
                         title={step.title}
                         description={step.description}
-                        contentBlocks={step.contentBlocks} // Pass contentBlocks instead of commands/pitfalls directly
+                        contentBlocks={step.contentBlocks}
                         defaultOpen={defaultOpen}
+                        allSectionRefs={allSectionRefs} // Pass allSectionRefs
                     />
                 ))}
             </div>
@@ -969,13 +1038,24 @@ function App() {
     );
 
     // Component for the Table of Contents
-    const TableOfContents = ({ content, activeSectionId, sectionRefs }) => {
+    const TableOfContents = ({ content, activeSectionId }) => {
         const scrollToSection = useCallback((id) => {
             const element = document.getElementById(id);
-            if (element) {
-                element.scrollIntoView({ behavior: 'smooth' });
+            if (element && mainContentRef.current) {
+                // Calculate scroll position relative to the scrollable container
+                const containerRect = mainContentRef.current.getBoundingClientRect();
+                const elementRect = element.getBoundingClientRect();
+                const scrollPosition = elementRect.top + mainContentRef.current.scrollTop - containerRect.top;
+
+                // Adjust for a little padding from the top if desired (e.g., header height)
+                const headerHeight = 80; // Approximate header height
+                mainContentRef.current.scrollTo({
+                    top: scrollPosition - headerHeight,
+                    behavior: 'smooth'
+                });
             }
         }, []);
+
 
         return (
             <nav className="sticky top-[80px] p-4 bg-gray-50 dark:bg-gray-850 rounded-xl shadow-md hidden lg:block h-[calc(100vh-100px)] overflow-y-auto custom-scrollbar transition-colors duration-200" aria-label="Table of Contents">
@@ -1094,14 +1174,16 @@ function App() {
             }
             // Optionally remove meta description if not desired globally
             // if (metaDescription && metaDescription.parentNode) {
-            //     metaDescription.parentNode.removeChild(metaDescription);
+            //     metaDescription.parentNode.removeChild(metaStatement);
             // }
         };
     }, [checklistContent]); // Re-run if checklist content changes to update schema
 
     // Handler for Back to Top button
     const handleBackToTop = () => {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+        if (mainContentRef.current) {
+            mainContentRef.current.scrollTo({ top: 0, behavior: 'smooth' }); // Scroll main content area, not window
+        }
     };
 
     // Render the main application layout
@@ -1118,11 +1200,12 @@ function App() {
             <main className="container mx-auto p-4 lg:p-8 pt-24 grid lg:grid-cols-4 gap-8">
                 {/* Table of Contents - Hidden on small screens */}
                 <aside className="lg:col-span-1">
-                    <TableOfContents content={filteredContent} activeSectionId={activeSectionId} sectionRefs={sectionRefs} />
+                    <TableOfContents content={filteredContent} activeSectionId={activeSectionId} />
                 </aside>
 
                 {/* Main Content Area */}
-                <div ref={mainContentRef} className="lg:col-span-3">
+                {/* Apply overflow-y-auto here to make this div scrollable for IntersectionObserver root */}
+                <div ref={mainContentRef} className="lg:col-span-3 overflow-y-auto max-h-[calc(100vh-100px)] custom-scrollbar">
                     <h1 className="text-4xl font-extrabold text-gray-900 dark:text-gray-50 mb-8 leading-tight">
                         FastAPI + Uvicorn on AWS EC2 Deployment Checklist
                     </h1>
@@ -1135,7 +1218,7 @@ function App() {
                             <ChecklistSection
                                 key={mainSection.id}
                                 mainSection={mainSection}
-                                sectionRefs={sectionRefs}
+                                allSectionRefs={allSectionRefs} // Pass allSectionRefs
                             />
                         ))
                     ) : (
